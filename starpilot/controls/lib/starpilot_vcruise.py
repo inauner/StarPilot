@@ -54,6 +54,16 @@ ADAS_MAX_MS = 17.88       # 40 mph — cross-street ADAS guard
 DASH_SEED_M = 27.0        # ~88 ft — typical ADAS detection distance, used to snap
                           # tracked length closer when dashboard confirms a sign
 FT_TO_M = 0.3048
+# Distance below which the adjacent-stopped hint is ignored — inside this the MPC and the
+# dash/model paths already own the stop, and a late-arriving hint could only jerk it.
+ADJACENT_STOP_MIN_USE_M = 10.0
+# NOTE: model_length is long-biased (+12.3 m) and swings ~15 m within one approach, so
+# filtering it before the sqrt below looks attractive. It was tried and measured over 39
+# stops and it is WORSE — mean ceiling error vs the ideal went 1.20 -> 1.22 m/s (median),
+# 1.31 (lowpass 0.5 s), 1.57 (lowpass 1.5 s), 6.91 (odometry decay + only-shorten). The
+# sqrt compresses distance error hard, so +12 m of distance is only ~1.1 m/s of ceiling,
+# and model_length is a fast-moving signal — any lag a filter adds costs more than the
+# noise it removes. Leave the raw value alone.
 FORCE_STOP_TURN_VETO_MAX_SPEED = 18.0 * CV.MPH_TO_MS
 # Real-turn steering angle. A stop-then-turn is still ~straight on approach, so a low
 # threshold caused legit stops to be skipped when the blinker came on early. Only suppress
@@ -201,6 +211,28 @@ class StarPilotVCruise:
     self.standstill_force_stop_clear_since = 0.0
     self.standstill_force_stop_started_at = None
     self.standstill_force_stop_reason = None
+
+  @staticmethod
+  def _get_adjacent_stop_distance(sm):
+    """dRel of a vehicle that decelerated to a stop in an adjacent lane, or None.
+
+    On a clear-lane red-light approach the model's own distance runs long, while a car
+    stopped alongside is physically at (or just behind) the stop bar. Measured over 39
+    approaches: present on ~10% of stops, reads a mean 6.3 m short of the true line, and
+    arrives a median 53 m out — inside the armed window. Radar-only, so this is
+    independent of whichever driving model is loaded.
+    """
+    try:
+      radar_state = sm["starpilotRadarState"]
+    except (KeyError, IndexError, TypeError, AttributeError):
+      return None
+
+    adjacent = getattr(radar_state, "adjacentStopped", None)
+    if adjacent is None or not getattr(adjacent, "status", False):
+      return None
+
+    d_rel = float(getattr(adjacent, "dRel", 0.0))
+    return d_rel if d_rel > ADJACENT_STOP_MIN_USE_M else None
 
   @staticmethod
   def _nav_maneuver_target_speed(maneuver_type, maneuver_modifier):
@@ -515,6 +547,14 @@ class StarPilotVCruise:
         self.tracked_model_length = min(self.tracked_model_length, self.starpilot_planner.model_length)
         if dash_active:
           self.tracked_model_length = min(self.tracked_model_length, DASH_SEED_M)
+
+        # A car that decelerated to a stop in the next lane is a physical marker for the
+        # stop bar, and a far better one than the model's own estimate. Applied as one
+        # more shortening clamp, which is the direction this estimator already only
+        # moves in — it can pull the stop in, never push it out.
+        adjacent_stop_d = self._get_adjacent_stop_distance(sm)
+        if adjacent_stop_d is not None:
+          self.tracked_model_length = min(self.tracked_model_length, adjacent_stop_d)
 
         # Kinematic profile with user offset. Positive offset shifts the perceived
         # line further down the road -> car rolls further before commanding 0.
