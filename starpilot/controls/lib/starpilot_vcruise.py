@@ -612,7 +612,12 @@ class StarPilotVCruise:
           and not turn_scene_active
           and not self.starpilot_planner.tracking_lead
           and not lead_present):
-        approach_d = self.starpilot_planner.model_length + offset_m
+        # adjacent-stopped hint caps the model distance; shorten-only, self-clearing
+        approach_d = self.starpilot_planner.model_length
+        adjacent_stop_d = self._get_adjacent_stop_distance(sm)
+        if adjacent_stop_d is not None:
+          approach_d = min(approach_d, adjacent_stop_d)
+        approach_d += offset_m
         if approach_d > MPC_HANDOFF_M:
           targets.append(math.sqrt(2.0 * FORCE_STOP_APPROACH_DECEL * (approach_d - MPC_HANDOFF_M)))
 
