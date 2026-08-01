@@ -130,6 +130,8 @@ class CameraView(Widget):
 
     self._placeholder_color: rl.Color | None = None
     self._closed = False
+    self._onroad_reentry_pending = False
+    self._reentry_stream_selected = False
 
     if self._use_egl and not self._create_egl_texture():
       cloudlog.error("CameraView EGL texture creation failed, falling back to texture rendering")
@@ -164,12 +166,23 @@ class CameraView(Widget):
     self._switching = False
     self._texture_needs_update = True
     self.last_connection_attempt = 0.0
+    self._onroad_reentry_pending = ui_state.is_onroad()
+    self._reentry_stream_selected = False
 
   def _set_placeholder_color(self, color: rl.Color):
     """Set a placeholder color to be drawn when no frame is available."""
     self._placeholder_color = color
 
+  def _refresh_available_streams(self) -> None:
+    streams = VisionIpcClient.available_streams(self._name, block=False)
+    if streams:
+      self.available_streams = list(streams)
+
   def switch_stream(self, stream_type: VisionStreamType) -> None:
+    if getattr(self, "_onroad_reentry_pending", False):
+      self._select_reentry_stream(stream_type)
+      return
+
     if self._switching:
       if self._target_stream_type == stream_type:
         return
@@ -193,6 +206,23 @@ class CameraView(Widget):
     self._target_client = None
     self._target_stream_type = None
     self._switching = False
+
+  def _select_reentry_stream(self, stream_type: VisionStreamType) -> None:
+    """Select the desired stream before displaying any post-transition frame."""
+    self._cancel_pending_switch()
+
+    if self._stream_type != stream_type:
+      old_client = self.client
+      self.client = None
+      del old_client
+      self.client = VisionIpcClient(self._name, stream_type, conflate=True)
+      self._stream_type = stream_type
+
+    self.frame = None
+    self._last_frame_id = -1
+    self._regressive_frame_count = 0
+    self._texture_needs_update = True
+    self._reentry_stream_selected = True
 
   @property
   def stream_type(self) -> VisionStreamType:
@@ -219,6 +249,8 @@ class CameraView(Widget):
     self.available_streams.clear()
     self.client = None
     self._target_client = None
+    self._onroad_reentry_pending = False
+    self._reentry_stream_selected = False
 
   def __del__(self):
     self.close()
@@ -244,6 +276,10 @@ class CameraView(Widget):
   def _render(self, rect: rl.Rectangle):
     if self._switching:
       self._handle_switch()
+
+    if self._onroad_reentry_pending and not self._reentry_stream_selected:
+      # Standalone CameraView users have no higher-level stream selector.
+      self._select_reentry_stream(self._stream_type)
 
     if not self._ensure_connection():
       self._draw_placeholder(rect)
@@ -333,6 +369,8 @@ class CameraView(Widget):
     self._last_frame_id = content_frame_id
     self._regressive_frame_count = 0
     self._texture_needs_update = True
+    self._onroad_reentry_pending = False
+    self._reentry_stream_selected = False
     return True
 
   def _render_egl(self, src_rect: rl.Rectangle, dst_rect: rl.Rectangle) -> bool:
@@ -475,6 +513,9 @@ class CameraView(Widget):
 
     # Initialize textures for new stream
     self._initialize_textures()
+    available_streams = getattr(self.client, "available_streams", None)
+    if available_streams is not None:
+      self.available_streams = available_streams(self._name, block=False)
 
   def _initialize_textures(self):
     self._clear_textures()

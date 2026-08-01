@@ -15,6 +15,7 @@ class FakeFrame:
 def _camera_view():
   view = big_cameraview.CameraView.__new__(big_cameraview.CameraView)
   view._name = "camerad"
+  view._stream_type = big_cameraview.VisionStreamType.VISION_STREAM_ROAD
   view.frame = None
   view._last_frame_id = -1
   view._regressive_frame_count = 0
@@ -39,6 +40,67 @@ def test_pending_switch_is_cancelled_when_requested_stream_is_current():
   assert view._target_client is None
   assert view._target_stream_type is None
   assert not view._switching
+
+
+def test_onroad_reentry_selects_requested_stream_before_rendering(monkeypatch):
+  view = _camera_view()
+  view._name = "camerad"
+  view._stream_type = big_cameraview.VisionStreamType.VISION_STREAM_WIDE_ROAD
+  view.client = object()
+  view._target_client = object()
+  view._target_stream_type = big_cameraview.VisionStreamType.VISION_STREAM_ROAD
+  view._switching = True
+  view._onroad_reentry_pending = True
+  view._reentry_stream_selected = False
+  clients = []
+
+  class FakeClient:
+    def __init__(self, name, stream_type, conflate):
+      self.name = name
+      self.stream_type = stream_type
+      self.conflate = conflate
+      clients.append(self)
+
+  monkeypatch.setattr(big_cameraview, "VisionIpcClient", FakeClient)
+  view.switch_stream(big_cameraview.VisionStreamType.VISION_STREAM_ROAD)
+
+  assert len(clients) == 1
+  assert view.client is clients[0]
+  assert view.client.stream_type == big_cameraview.VisionStreamType.VISION_STREAM_ROAD
+  assert view.stream_type == big_cameraview.VisionStreamType.VISION_STREAM_ROAD
+  assert view._target_client is None
+  assert view._target_stream_type is None
+  assert not view._switching
+  assert view._reentry_stream_selected
+
+
+def test_onroad_reentry_guard_clears_on_first_fresh_frame():
+  view = _camera_view()
+  view._onroad_reentry_pending = True
+  view._reentry_stream_selected = True
+
+  assert view._accept_frame(FakeFrame(frame_id=1, idx=0), packet_frame_id=1)
+  assert not view._onroad_reentry_pending
+  assert not view._reentry_stream_selected
+
+
+def test_standalone_camera_reentry_selects_configured_stream():
+  view = _camera_view()
+  view._switching = False
+  view._onroad_reentry_pending = True
+  view._reentry_stream_selected = False
+  selected = []
+  placeholders = []
+  view._select_reentry_stream = lambda stream_type: (
+    selected.append(stream_type), setattr(view, "_reentry_stream_selected", True)
+  )
+  view._draw_placeholder = lambda rect: placeholders.append(rect)
+  view._ensure_connection = lambda: False
+
+  view._render(object())
+
+  assert selected == [view._stream_type]
+  assert len(placeholders) == 1
 
 
 def test_reused_egl_slot_cannot_move_camera_backwards(monkeypatch):

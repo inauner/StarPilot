@@ -835,6 +835,9 @@ class AugmentedRoadView(CameraView):
       self._reverse_driver_camera_active = False
       return
 
+    if getattr(self, "_onroad_reentry_pending", False):
+      self._refresh_available_streams()
+
     if self._update_reverse_driver_camera_state():
       self.switch_stream(DRIVER_CAM)
       return
@@ -857,7 +860,8 @@ class AugmentedRoadView(CameraView):
     else:
       target = ROAD_CAM
 
-    if self.stream_type != target or (self._switching and self._target_stream_type != target):
+    if (getattr(self, "_onroad_reentry_pending", False) or
+        self.stream_type != target or (self._switching and self._target_stream_type != target)):
       self.switch_stream(target)
 
   def _update_calibration(self):

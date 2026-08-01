@@ -164,3 +164,34 @@ def test_reverse_activation_cancels_mismatched_pending_switch():
   assert view._target_client is None
   assert view._target_stream_type is None
   assert not view._switching
+
+
+def test_onroad_transition_marks_camera_reentry(monkeypatch):
+  module = big_cameraview
+
+  class FakeClient:
+    pass
+
+  view = module.CameraView.__new__(module.CameraView)
+  view._name = "camerad"
+  view._stream_type = object()
+  view.client = FakeClient()
+  view.frame = None
+  view.available_streams = []
+  view._target_client = None
+  view._target_stream_type = None
+  view._switching = False
+  view._texture_needs_update = False
+  view._regressive_frame_count = 1
+  view._closed = True
+  view._onroad_reentry_pending = False
+  view._reentry_stream_selected = False
+  view._clear_textures = lambda: None
+
+  monkeypatch.setattr(module, "VisionIpcClient", lambda *_args, **_kwargs: FakeClient())
+  monkeypatch.setattr(module.ui_state, "is_onroad", lambda: True)
+
+  view._offroad_transition()
+
+  assert view._onroad_reentry_pending
+  assert not view._reentry_stream_selected
