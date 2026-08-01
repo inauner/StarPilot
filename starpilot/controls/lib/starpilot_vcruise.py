@@ -45,14 +45,17 @@ ACTIVATION_HYSTERESIS_M = 8.0  # m — release margin; absorbs model_length jitt
 LEAD_VETO_M = 75.0        # m — lead proximity that vetoes Force Stop (not ACTIVATION_M,
                           # so raising activation can't silently widen the veto)
 MPC_HANDOFF_M = 6.0       # m — below this, command 0 and let MPC finish the stop
-FORCE_STOP_APPROACH_DECEL = 0.9  # m/s^2 — speed ceiling before commit. LOWER = slower ceiling
+FORCE_STOP_APPROACH_DECEL = 0.75  # m/s^2 — speed ceiling before commit. LOWER = slower ceiling
                           # = more early braking. Must stay above FORCE_STOP_MODEL_APPROACH_DECEL
                           # or the pre-commit ceiling is stricter than the stop itself.
-                          # 1.2 road-tested too loose: only asked a 50 mph car to shed 1.7 mph
-                          # by 200 m, and the car delivers ~50-75% of the commanded decel.
+                          # 1.2 road-tested too loose; 0.9 left a ~1.0->2.5 decel step at
+                          # commit that riders feel (fix6) — 0.75 trades earlier braking for
+                          # a softer handoff into the stop.
 ADAS_MAX_MS = 17.88       # 40 mph — cross-street ADAS guard
 DASH_SEED_M = 27.0        # ~88 ft — typical ADAS detection distance, used to snap
                           # tracked length closer when dashboard confirms a sign
+DASH_MODEL_AGREE_M = 50.0 # m — dash arm/snap requires model_length under this; a lone
+                          # dash bit against a long model path is a phantom (b6 mid-road stop)
 FT_TO_M = 0.3048
 # Distance below which the adjacent-stopped hint is ignored — inside this the MPC and the
 # dash/model paths already own the stop, and a late-arriving hint could only jerk it.
@@ -377,6 +380,7 @@ class StarPilotVCruise:
     dash_active = dash_value > 0
     dash_path = (dash_active and controls_enabled and starpilot_toggles.force_stops
                  and v_ego < ADAS_MAX_MS
+                 and self.starpilot_planner.model_length < DASH_MODEL_AGREE_M
                  and self.override_force_stop_timer <= 0
                  and not self.starpilot_planner.driving_in_curve
                  and not turn_scene_active
@@ -542,11 +546,16 @@ class StarPilotVCruise:
         # Kinematic distance estimator (also published as forcingStopLength).
         # Decay one-to-one with motion, clamp by current model_length so we adopt
         # the model's view when it regains sight, and snap closer to DASH_SEED_M
-        # whenever the dashboard signal is active.
+        # when the dashboard signal is active and the model agrees a stop is near.
         self.tracked_model_length = max(self.tracked_model_length - (v_ego * DT_MDL), 0.0)
         self.tracked_model_length = min(self.tracked_model_length, self.starpilot_planner.model_length)
         if dash_active:
-          self.tracked_model_length = min(self.tracked_model_length, DASH_SEED_M)
+          if self.starpilot_planner.model_length < DASH_MODEL_AGREE_M:
+            self.tracked_model_length = min(self.tracked_model_length, DASH_SEED_M)
+          # inside the seed the model range is the better line estimate; following it back
+          # up is what keeps an early snap from parking us short of the sign
+          if self.starpilot_planner.model_length < DASH_SEED_M:
+            self.tracked_model_length = self.starpilot_planner.model_length
 
         # A car that decelerated to a stop in the next lane is a physical marker for the
         # stop bar, and a far better one than the model's own estimate. Applied as one
