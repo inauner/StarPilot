@@ -19,7 +19,7 @@ from openpilot.selfdrive.ui.mici.onroad.starpilot_status import (
   TRAFFIC_COLOR,
   get_border_color,
 )
-from openpilot.selfdrive.ui.mici.onroad.cameraview import CameraView
+from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.selfdrive.ui.lib.starpilot_visuals import get_border_width
 from openpilot.starpilot.common.favorite_slots import is_favorite_action_key, load_favorite_slots, toggle_favorite_slot
 from openpilot.system.ui.lib.application import FontWeight, gui_app, MousePos, MouseEvent
@@ -830,14 +830,13 @@ class AugmentedRoadView(CameraView):
 
   def _switch_stream_if_needed(self, sm, camera_view: int):
     if camera_view == CAMERA_VIEW_NONE:
+      self._cancel_pending_switch()
       self._reverse_driver_camera_frames = 0
       self._reverse_driver_camera_active = False
       return
 
     if self._update_reverse_driver_camera_state():
-      target = DRIVER_CAM
-      if self.stream_type != target:
-        self.switch_stream(target)
+      self.switch_stream(DRIVER_CAM)
       return
 
     if camera_view == CAMERA_VIEW_DRIVER:
@@ -858,7 +857,7 @@ class AugmentedRoadView(CameraView):
     else:
       target = ROAD_CAM
 
-    if self.stream_type != target:
+    if self.stream_type != target or (self._switching and self._target_stream_type != target):
       self.switch_stream(target)
 
   def _update_calibration(self):

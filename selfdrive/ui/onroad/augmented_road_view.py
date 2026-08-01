@@ -200,6 +200,7 @@ class AugmentedRoadView(CameraView):
 
   def _switch_stream_if_needed(self, sm, camera_view: int):
     if camera_view == CAMERA_VIEW_NONE:
+      self._cancel_pending_switch()
       self._reverse_driver_camera_frames = 0
       self._reverse_driver_camera_active = False
       return
@@ -224,7 +225,7 @@ class AugmentedRoadView(CameraView):
     else:
       target = ROAD_CAM
 
-    if self.stream_type != target:
+    if self.stream_type != target or (self._switching and self._target_stream_type != target):
       self.switch_stream(target)
 
   def _update_calibration(self):

@@ -2,14 +2,13 @@ import gc
 from types import SimpleNamespace
 import weakref
 
-import pytest
-
-from openpilot.selfdrive.ui.mici.onroad import cameraview as mici_cameraview
 from openpilot.selfdrive.ui.onroad import cameraview as big_cameraview
+from openpilot.selfdrive.ui.mici.onroad import augmented_road_view as mici_augmented_road_view
 
 
-@pytest.mark.parametrize("module", (mici_cameraview, big_cameraview))
-def test_road_transition_releases_camera_buffers(monkeypatch, module):
+def test_road_transition_releases_camera_buffers(monkeypatch):
+  module = big_cameraview
+
   class FakeClient:
     pass
 
@@ -25,6 +24,7 @@ def test_road_transition_releases_camera_buffers(monkeypatch, module):
   view._target_stream_type = object()
   view._switching = True
   view._texture_needs_update = False
+  view._regressive_frame_count = 2
   view.last_connection_attempt = 123.0
   view._closed = True
   cleared = []
@@ -44,11 +44,13 @@ def test_road_transition_releases_camera_buffers(monkeypatch, module):
   assert view._target_stream_type is None
   assert view._switching is False
   assert view._texture_needs_update
+  assert view._regressive_frame_count == 0
   assert view.last_connection_attempt == 0.0
 
 
-@pytest.mark.parametrize("module", (mici_cameraview, big_cameraview))
-def test_transition_callback_does_not_retain_camera_view(monkeypatch, module):
+def test_transition_callback_does_not_retain_camera_view(monkeypatch):
+  module = big_cameraview
+
   class FakeClient:
     pass
 
@@ -72,8 +74,9 @@ def test_transition_callback_does_not_retain_camera_view(monkeypatch, module):
   assert callbacks == []
 
 
-@pytest.mark.parametrize("module", (mici_cameraview, big_cameraview))
-def test_stream_switch_releases_graphics_before_old_client(module):
+def test_stream_switch_releases_graphics_before_old_client():
+  module = big_cameraview
+
   events = []
 
   class FakeClient:
@@ -86,6 +89,8 @@ def test_stream_switch_releases_graphics_before_old_client(module):
   view._target_stream_type = object()
   view._stream_type = object()
   view._switching = True
+  view.frame = SimpleNamespace(frame_id=10)
+  view._regressive_frame_count = 2
   view._texture_needs_update = False
   view._closed = True
   view._clear_textures = lambda: events.append("graphics")
@@ -96,10 +101,12 @@ def test_stream_switch_releases_graphics_before_old_client(module):
 
   assert old_client_finalizer.alive is False
   assert events == ["graphics", "client", "initialize"]
+  assert view._regressive_frame_count == 0
 
 
-@pytest.mark.parametrize("module", (mici_cameraview, big_cameraview))
-def test_egl_cleanup_deletes_texture_before_images(monkeypatch, module):
+def test_egl_cleanup_deletes_texture_before_images(monkeypatch):
+  module = big_cameraview
+
   events = []
   view = module.CameraView.__new__(module.CameraView)
   view.texture_y = None
@@ -108,10 +115,7 @@ def test_egl_cleanup_deletes_texture_before_images(monkeypatch, module):
   view.egl_images = {0: object(), 1: object()}
   view._closed = True
 
-  if module is mici_cameraview:
-    view._use_egl = True
-  else:
-    monkeypatch.setattr(module, "TICI", True)
+  view._use_egl = True
 
   monkeypatch.setattr(module.rl, "unload_texture", lambda _texture: events.append("texture"))
   monkeypatch.setattr(module, "destroy_egl_image", lambda _image: events.append("image"))
@@ -121,3 +125,42 @@ def test_egl_cleanup_deletes_texture_before_images(monkeypatch, module):
   assert events == ["texture", "image", "image"]
   assert view.egl_texture is None
   assert view.egl_images == {}
+
+
+def test_egl_cleanup_synchronizes_after_backend_switch(monkeypatch):
+  module = big_cameraview
+
+  events = []
+  view = module.CameraView.__new__(module.CameraView)
+  view.texture_y = None
+  view.texture_uv = None
+  view.egl_texture = SimpleNamespace(id=7)
+  view.egl_images = {0: object()}
+  view._use_egl = False
+  view._closed = True
+
+  monkeypatch.setattr(module, "is_egl_initialized", lambda: True)
+  monkeypatch.setattr(module.rl, "rl_draw_render_batch_active", lambda: events.append("flush"))
+  monkeypatch.setattr(module, "finish_gl", lambda: events.append("finish"))
+  monkeypatch.setattr(module.rl, "unload_texture", lambda _texture: events.append("texture"))
+  monkeypatch.setattr(module, "destroy_egl_image", lambda _image: events.append("image"))
+
+  view._clear_textures()
+
+  assert events == ["flush", "finish", "texture", "image"]
+
+
+def test_reverse_activation_cancels_mismatched_pending_switch():
+  view = mici_augmented_road_view.AugmentedRoadView.__new__(mici_augmented_road_view.AugmentedRoadView)
+  view._stream_type = mici_augmented_road_view.DRIVER_CAM
+  view._target_stream_type = mici_augmented_road_view.WIDE_CAM
+  view._target_client = object()
+  view._switching = True
+  view._closed = True
+  view._update_reverse_driver_camera_state = lambda: True
+
+  view._switch_stream_if_needed(None, mici_augmented_road_view.CAMERA_VIEW_AUTO)
+
+  assert view._target_client is None
+  assert view._target_stream_type is None
+  assert not view._switching
