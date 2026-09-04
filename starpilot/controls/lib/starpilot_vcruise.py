@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import json
 import math
+import time
 
+from openpilot.starpilot.system.uniden_shm import get_shm_param, set_shm_param
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
 
@@ -677,6 +679,29 @@ class StarPilotVCruise:
       self._applied_slc_control_target = slc_control_target if slc_control_target > 0.0 else 0.0
       if slc_control_target >= CSC_MIN_SPEED:
         targets.append(slc_control_target)
+
+      # Uniden Radar & Road Alerts Auto-Slowdown (drops cruise target strictly to raw posted speed limit without offset)
+      now_mono = time.monotonic()
+      radar_heartbeat = float(get_shm_param("UnidenRadarHeartbeat", 0.0) or 0.0)
+      radar_alive = (now_mono - radar_heartbeat) <= 3.0 if radar_heartbeat > 0 else True
+      uniden_slowdown = get_shm_param("UnidenAutoSlowdown", True) and get_shm_param("UnidenRadarAlertActive", False) and radar_alive
+      road_alert_slowdown = get_shm_param("WazePoliceSlowdownActive", False) or get_shm_param("RoadHazardSlowdownActive", False)
+
+      # Check for manual gas pedal override: hold until slowdown ends or gas is applied
+      gas_pressed = bool(sm["carState"].gasPressed or sm["carState"].gas > 1e-3 or self.slc.overridden_speed > 0.0)
+      if road_alert_slowdown or uniden_slowdown:
+        if gas_pressed:
+          set_shm_param("RoadAlertGasOverride", True)
+      else:
+        set_shm_param("RoadAlertGasOverride", False)
+
+      gas_override = get_shm_param("RoadAlertGasOverride", False)
+      if (uniden_slowdown or road_alert_slowdown) and not gas_override:
+        if self.slc_target > 0.0:
+          slc_control_target = self.slc_target
+          self._applied_slc_control_target = slc_control_target
+          targets.append(slc_control_target)
+
       if self.nav_turn_target > 0.0:
         targets.append(self.nav_turn_target)
 

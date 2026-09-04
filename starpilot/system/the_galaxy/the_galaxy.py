@@ -102,6 +102,7 @@ from openpilot.starpilot.navigation.destination_store import normalize_destinati
 from openpilot.starpilot.system.the_galaxy.factory_reset import remove_path as _run_factory_reset_delete
 from openpilot.starpilot.system.the_galaxy import flm_workspace, utilities
 from openpilot.starpilot.system.the_galaxy.update_recovery import inspect_interrupted_update, public_recovery_status, recover_interrupted_update
+from openpilot.starpilot.system.bluetooth import BluetoothClient
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 # Keep Galaxy independent of opendbc's generated car bindings while matching RivianFlags.ANGLE_HARNESS.
@@ -8663,6 +8664,268 @@ def setup(app):
         file_handle.close()
         return response
     return {"error": "Video not found"}, 404
+
+  @app.route("/api/bluetooth/status", methods=["GET"])
+  def bluetooth_status():
+    try:
+      status = BluetoothClient(timeout=3.0).status()
+      return jsonify(BluetoothClient.serialize_status(status)), 200
+    except Exception as error:
+      return jsonify({
+        "available": False,
+        "enabled": params.get_bool("BluetoothEnabled"),
+        "offroad": params.get_bool("IsOffroad"),
+        "selected_audio": params.get("BluetoothAudioAddress", encoding="utf-8") or "",
+        "devices": [],
+        "error": str(error),
+      }), 503
+
+  @app.route("/api/bluetooth/<operation>", methods=["POST"])
+  def bluetooth_operation(operation):
+    commands = {
+      "power": "set_power",
+      "scan": "start_scan",
+      "stop_scan": "stop_scan",
+      "pair": "pair",
+      "connect": "connect",
+      "disconnect": "disconnect",
+      "forget": "forget",
+      "select_audio": "select_audio",
+      "test_audio": "test_audio",
+      "pairing_response": "pairing_response",
+    }
+    command = commands.get(operation)
+    if command is None:
+      return jsonify({"error": "Unknown Bluetooth operation."}), 404
+    offroad_only = {"power", "scan", "stop_scan", "pair", "forget", "test_audio", "pairing_response"}
+    if operation in offroad_only and not params.get_bool("IsOffroad"):
+      return jsonify({"error": "Bluetooth settings can only be changed offroad."}), 409
+
+    data = request.get_json(silent=True) or {}
+    payload = {}
+    if command == "set_power":
+      payload["enabled"] = bool(data.get("enabled", False))
+    elif command == "pairing_response":
+      payload = {
+        "prompt_id": str(data.get("prompt_id", "")),
+        "accepted": bool(data.get("accepted", False)),
+        "value": str(data.get("value", "")),
+      }
+    elif command not in {"start_scan", "stop_scan"}:
+      payload["address"] = str(data.get("address", ""))
+      if not payload["address"] and command != "select_audio":
+        return jsonify({"error": "Bluetooth device address is required."}), 400
+    try:
+      client = BluetoothClient(timeout=10.0)
+      if command == "set_power":
+        client.set_power(payload["enabled"])
+        result = {}
+      else:
+        result = client.call(command, **payload)
+      return jsonify({"message": "Bluetooth operation started.", **result}), 200
+    except Exception as error:
+      return jsonify({"error": str(error)}), 503
+
+
+  # Uniden R4 Radar Detector Endpoints
+  @app.route("/api/uniden/settings", methods=["GET"])
+  def uniden_get_settings():
+    from starpilot.system.uniden_r4 import get_all_settings
+    return jsonify(get_all_settings())
+
+  @app.route("/api/uniden/settings", methods=["POST"])
+  def uniden_update_settings():
+    from starpilot.system.uniden_r4 import update_settings
+    data = request.get_json(silent=True) or {}
+    updated = update_settings(data)
+    # Return both flat and nested 'settings' for UI client compatibility
+    resp = {"success": True, "settings": updated}
+    resp.update(updated)
+    return jsonify(resp)
+
+  @app.route("/api/uniden/status", methods=["GET"])
+  def uniden_get_status():
+    from starpilot.system.uniden_r4 import get_connection_status
+    return jsonify(get_connection_status())
+
+  @app.route("/api/uniden/action/<action>", methods=["POST"])
+  def uniden_action(action):
+    from starpilot.system.uniden_r4 import trigger_action
+    result = trigger_action(action)
+    return jsonify(result)
+
+  # Live Road Alerts Endpoints
+  @app.route("/api/road_alerts/live", methods=["GET"])
+  def road_alerts_get_live():
+    from starpilot.system.uniden_shm import get_shm_param
+    try:
+      cached_raw = get_shm_param("RoadAlertsList", "")
+      upcoming = []
+      if cached_raw:
+        try:
+          upcoming = json.loads(cached_raw)
+        except Exception:
+          upcoming = []
+
+      # Instant zero-latency filter in memory based on current settings
+      show_police = get_shm_param("RoadAlertShowPolice", True)
+      show_traffic = get_shm_param("RoadAlertShowTraffic", True)
+      show_accidents = get_shm_param("RoadAlertShowAccidents", True)
+      show_closures = get_shm_param("RoadAlertShowClosures", True)
+      show_lane_closures = get_shm_param("RoadAlertShowLaneClosures", True)
+      show_hazard_on_road = get_shm_param("RoadAlertShowHazardOnRoad", True)
+      show_hazard_on_shoulder = get_shm_param("RoadAlertShowHazardOnShoulder", True)
+      show_weather = get_shm_param("RoadAlertShowWeather", True)
+      show_general = get_shm_param("RoadAlertShowGeneral", True)
+      display_max_age = int(get_shm_param("RoadAlertDisplayMaxAgeMin", 0) or 0)
+      display_max_dist = float(get_shm_param("RoadAlertDisplayMaxDistMi", 30.0) or 30.0)
+
+      filtered_upcoming = []
+      for inc in upcoming:
+        cat = inc.get("category", "")
+        if cat == "POLICE" and not show_police:
+          continue
+        if cat == "TRAFFIC" and not show_traffic:
+          continue
+        if cat == "ACCIDENT" and not show_accidents:
+          continue
+        if cat == "CLOSURE" and not show_closures:
+          continue
+        if cat == "LANE_CLOSURE" and not show_lane_closures:
+          continue
+        if cat == "HAZARD_ON_ROAD" and not show_hazard_on_road:
+          continue
+        if cat == "HAZARD_ON_SHOULDER" and not show_hazard_on_shoulder:
+          continue
+        if cat == "WEATHER" and not show_weather:
+          continue
+        if cat == "GENERAL" and not show_general:
+          continue
+
+        age_mins = inc.get("age_mins", 0)
+        is_active = inc.get("is_active", False) or (inc.get("time") == "Active")
+        if display_max_age > 0 and not is_active and (age_mins > display_max_age):
+          continue
+
+        dist = inc.get("distance_miles", 99.0)
+        if dist > display_max_dist:
+          continue
+
+        filtered_upcoming.append(inc)
+      
+      active_threat = None
+      if get_shm_param("UnidenRadarAlertActive", False):
+        band = str(get_shm_param("UnidenRadarAlertBand", "") or "").upper()
+        strength = get_shm_param("UnidenRadarAlertStrength", 0)
+        desc = str(get_shm_param("UnidenRadarAlertDescription", "") or "")
+        active_threat = {
+          "source": "Uniden R4",
+          "category": "RADAR",
+          "label": f"RADAR: {band} BAND",
+          "icon": "⚡",
+          "distance_miles": 0.0,
+          "location": f"Signal Strength: {strength}/8",
+          "detail": desc or f"{band} Radar Frequency Detected",
+          "is_radar": True,
+        }
+      elif get_shm_param("RoadAlertActive", False):
+        dist = float(get_shm_param("RoadAlertDistance", 0.0) or 0.0)
+        if 0.0 < dist <= 0.5:
+          active_threat = {
+            "source": get_shm_param("RoadAlertSource", "Waze"),
+            "category": get_shm_param("RoadAlertCategory", ""),
+            "label": get_shm_param("RoadAlertLabel", ""),
+            "type": get_shm_param("RoadAlertSubtype", ""),
+            "lane": get_shm_param("RoadAlertLane", ""),
+            "icon": get_shm_param("RoadAlertIcon", "⚠️"),
+            "distance_miles": dist,
+            "location": get_shm_param("RoadAlertLocation", ""),
+            "detail": get_shm_param("RoadAlertDetail", ""),
+            "time": get_shm_param("RoadAlertTime", ""),
+            "is_radar": False,
+          }
+
+      settings = {
+        "WazePoliceAutoSlowdown": get_shm_param("WazePoliceAutoSlowdown", True),
+        "WazePoliceSlowdownHidden": get_shm_param("WazePoliceSlowdownHidden", True),
+        "WazePoliceMinConfirmations": get_shm_param("WazePoliceMinConfirmations", 3),
+        "WazePoliceTriggerDistance": get_shm_param("WazePoliceTriggerDistance", 1.0),
+        "WazePoliceSlowdownActive": get_shm_param("WazePoliceSlowdownActive", False),
+        "WazePoliceSlowdownDist": get_shm_param("WazePoliceSlowdownDist", 0.0),
+        "RoadAlertShowPolice": show_police,
+        "RoadAlertShowTraffic": show_traffic,
+        "RoadAlertShowAccidents": show_accidents,
+        "RoadAlertShowClosures": show_closures,
+        "RoadAlertShowLaneClosures": show_lane_closures,
+        "RoadAlertShowHazardOnRoad": show_hazard_on_road,
+        "RoadAlertShowHazardOnShoulder": show_hazard_on_shoulder,
+        "RoadAlertShowWeather": show_weather,
+        "RoadAlertShowGeneral": show_general,
+        "RoadAlertDisplayMaxDistMi": display_max_dist,
+        "RoadAlertDisplayMaxAgeMin": display_max_age,
+        "RoadAlertSlowdownTraffic": get_shm_param("RoadAlertSlowdownTraffic", True),
+        "RoadAlertSlowdownAccidents": get_shm_param("RoadAlertSlowdownAccidents", True),
+        "RoadAlertSlowdownClosures": get_shm_param("RoadAlertSlowdownClosures", True),
+        "RoadAlertSlowdownLaneClosures": get_shm_param("RoadAlertSlowdownLaneClosures", True),
+        "RoadAlertSlowdownHazardOnRoad": get_shm_param("RoadAlertSlowdownHazardOnRoad", True),
+        "RoadAlertSlowdownWeather": get_shm_param("RoadAlertSlowdownWeather", False),
+        "RoadAlertSlowdownMaxAgeMin": get_shm_param("RoadAlertSlowdownMaxAgeMin", 30),
+        "RoadAlertSlowdownSameRoadOnly": get_shm_param("RoadAlertSlowdownSameRoadOnly", False),
+        "CurrentRoadName": str(get_shm_param("CurrentRoadName", "")),
+        "RoadHazardSlowdownActive": get_shm_param("RoadHazardSlowdownActive", False),
+        "WazeSessionId": str(get_shm_param("WazeSessionId", "")),
+        "WazeSecretKey": str(get_shm_param("WazeSecretKey", "")),
+        "WazeAuthStatus": str(get_shm_param("WazeAuthStatus", "Active")),
+      }
+
+      return jsonify({
+        "alerts": filtered_upcoming,
+        "active_threat": active_threat,
+        "total_count": len(filtered_upcoming),
+        "gps": {
+          "lat": float(get_shm_param("LastGpsLat", 0.0) or 0.0),
+          "lon": float(get_shm_param("LastGpsLon", 0.0) or 0.0),
+          "bearing": float(get_shm_param("LastGpsBearing", 0.0) or 0.0),
+        },
+        "settings": settings,
+        "status": "ok"
+      })
+    except Exception as e:
+      return jsonify({"error": str(e)}), 500
+
+  @app.route("/api/road_alerts/settings", methods=["POST"])
+  def road_alerts_update_settings():
+    from starpilot.system.uniden_shm import set_shm_param
+    data = request.get_json(silent=True) or {}
+    if "key" in data and "value" in data and len(data) <= 3:
+      set_shm_param(str(data["key"]), data["value"])
+    for k, v in data.items():
+      if k not in ("key", "value"):
+        set_shm_param(k, v)
+    return jsonify({"success": True, "settings": data})
+
+  @app.route("/api/road_alerts/action/<action>", methods=["POST"])
+  def road_alerts_action(action):
+    from starpilot.system.road_alerts_d import RoadAlertsDaemon
+    from starpilot.system.uniden_shm import set_shm_param
+    if action == "refresh":
+      daemon = RoadAlertsDaemon()
+      daemon.update_gps()
+      daemon.fetch_waze()
+      return jsonify({"success": True, "message": "Refreshed incidents"})
+    elif action == "reauth_waze":
+      daemon = RoadAlertsDaemon()
+      daemon.update_gps()
+      res = daemon.waze.register_and_login(daemon.current_lat or 37.7749, daemon.current_lon or -122.4194, force=True)
+      return jsonify({"success": res, "message": "Waze session refreshed" if res else "Waze login failed"})
+    elif action == "clear_session":
+      set_shm_param("WazeSessionId", "")
+      set_shm_param("WazeSecretKey", "")
+      set_shm_param("WazeAuthStatus", "Cleared")
+      return jsonify({"success": True, "message": "Waze session tokens cleared"})
+    return jsonify({"error": "Unknown action"}), 400
+
+
 
 def main():
   while not _ensure_galaxy_web_deps():

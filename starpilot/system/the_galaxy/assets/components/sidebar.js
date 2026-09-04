@@ -11,6 +11,9 @@ const MENU_ITEMS = {
   ],
   tools: [
     { name: "Toggles", link: "/device_settings", icon: "bi-toggle-on" },
+    { name: "Bluetooth", link: "/bluetooth", icon: "bi-bluetooth" },
+    { name: "Uniden R4", link: "/uniden_r4", icon: "bi-broadcast" },
+    { name: "Live Road Alerts", link: "/road_alerts", icon: "bi-broadcast-pin" },
     { name: "Download Speed Limits", link: "/download_speed_limits", icon: "bi-download" },
     { name: "Error Logs", link: "/manage_error_logs", icon: "bi-exclamation-triangle" },
     { name: "Galaxy", link: "/galaxy", icon: "bi-globe2" },

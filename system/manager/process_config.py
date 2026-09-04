@@ -102,6 +102,10 @@ def run_navigationd(started: bool, params: Params, CP: car.CarParams, starpilot_
   return started and params.get("NavDestination") is not None
 
 
+def bluetooth_enabled(started: bool, params: Params, CP: car.CarParams, starpilot_toggles: SimpleNamespace) -> bool:
+  return params.get_bool("BluetoothEnabled")
+
+
 def run_v_asm(started: bool, params: Params, CP: car.CarParams, starpilot_toggles: SimpleNamespace) -> bool:
   return started and getattr(starpilot_toggles, "v_asm_enabled", False)
 
@@ -174,7 +178,10 @@ procs = [
 
 # StarPilot variables
 procs += [
+  PythonProcess("bluetooth_managerd", "starpilot.system.bluetooth.daemon", bluetooth_enabled, enabled=TICI),
   PythonProcess("the_galaxy", "starpilot.system.the_galaxy.the_galaxy", always_run, nice=10),
+  PythonProcess("uniden_radar_d", "starpilot.system.uniden_radar_d", always_run, nice=10),
+  PythonProcess("road_alerts_d", "starpilot.system.road_alerts_d", always_run, nice=10),
   PythonProcess("galaxy", "starpilot.system.galaxy.galaxy", always_run, nice=10),
 ]
 

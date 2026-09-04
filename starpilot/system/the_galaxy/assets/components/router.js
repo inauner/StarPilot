@@ -1,3 +1,6 @@
+import { UnidenR4View } from "/assets/components/tools/uniden_r4.js?v=20260903-button-rows"
+import { RoadAlertsView } from "/assets/components/tools/road_alerts.js?v=20260903-lane-context"
+import { Bluetooth } from "/assets/components/tools/bluetooth.js?v=bluetooth-5"
 import { html, reactive } from "/assets/vendor/arrow-core.js"
 import { createBrowserHistory, createRouter } from "/assets/vendor/remix-router-1.3.1.js"
 import { hideSidebar } from "/assets/js/utils.js"
@@ -66,6 +69,9 @@ function SafeHome() {
 
 function Root() {
   let routes = [
+    createRoute("bluetooth", "/bluetooth", Bluetooth),
+    createRoute("uniden_r4", "/uniden_r4", UnidenR4View),
+    createRoute("road_alerts", "/road_alerts", RoadAlertsView),
     createRoute("device_settings", "/device_settings/:section?", DeviceSettings),
     createRoute("errorLogs", "/manage_error_logs", ErrorLogs),
     createRoute("galaxy", "/galaxy", GalaxyPairing),
